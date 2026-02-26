@@ -30,22 +30,56 @@ from pyftms import (
     get_machine_type_from_service_data,
 )
 
-from .const import DOMAIN
+from .const import (
+    CONF_STRAVA_ACTIVITY_TYPE,
+    CONF_STRAVA_CLIENT_ID,
+    CONF_STRAVA_CLIENT_SECRET,
+    CONF_STRAVA_GEAR_ID,
+    CONF_STRAVA_HIDE_FROM_HOME,
+    CONF_STRAVA_NAME_TEMPLATE,
+    CONF_STRAVA_PRIVATE,
+    CONF_STRAVA_REFRESH_TOKEN,
+    DEFAULT_NAME_TEMPLATE,
+    DOMAIN,
+    STRAVA_AUTH_URL,
+    STRAVA_CALLBACK_PORT,
+)
 
 _LOGGER = logging.getLogger(__name__)
+
+
+# ── Options Flow ─────────────────────────────────────────────────────────
 
 
 class OptionsFlowHandler(OptionsFlowWithConfigEntry):
     def __init__(self, config_entry: ConfigEntry) -> None:
         super().__init__(config_entry)
+        self._strava_client_id: str = ""
+        self._strava_client_secret: str = ""
+        self._strava_refresh_token: str = ""
+        self._gear_list: list[dict[str, str]] = []
+
+    # ── Menu ──────────────────────────────────────────────────────────
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Options Handler."""
+        """Options menu: choose what to configure."""
+        return self.async_show_menu(
+            step_id="init",
+            menu_options=["sensors", "strava_credentials"],
+        )
 
+    # ── Sensor Selection (existing behavior) ─────────────────────────
+
+    async def async_step_sensors(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Sensor selection handler (unchanged from original)."""
         if user_input is not None:
-            return self.async_create_entry(title="", data=user_input)
+            new_opts = dict(self.options)
+            new_opts[CONF_SENSORS] = user_input[CONF_SENSORS]
+            return self.async_create_entry(title="", data=new_opts)
 
         address = self.config_entry.data[CONF_ADDRESS]
 
@@ -69,9 +103,216 @@ class OptionsFlowHandler(OptionsFlowWithConfigEntry):
         )
 
         return self.async_show_form(
-            step_id="init",
+            step_id="sensors",
             data_schema=self.add_suggested_values_to_schema(schema, self.options),
         )
+
+    # ── Strava Credentials ───────────────────────────────────────────
+
+    async def async_step_strava_credentials(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Step 1: Enter Strava API credentials (or clear to disable)."""
+        if user_input is not None:
+            client_id = user_input.get(CONF_STRAVA_CLIENT_ID, "").strip()
+            client_secret = user_input.get(CONF_STRAVA_CLIENT_SECRET, "").strip()
+
+            if not client_id or not client_secret:
+                # Clear Strava configuration
+                new_opts = dict(self.options)
+                for key in (
+                    CONF_STRAVA_CLIENT_ID,
+                    CONF_STRAVA_CLIENT_SECRET,
+                    CONF_STRAVA_REFRESH_TOKEN,
+                    CONF_STRAVA_ACTIVITY_TYPE,
+                    CONF_STRAVA_NAME_TEMPLATE,
+                    CONF_STRAVA_HIDE_FROM_HOME,
+                    CONF_STRAVA_PRIVATE,
+                    CONF_STRAVA_GEAR_ID,
+                ):
+                    new_opts.pop(key, None)
+                return self.async_create_entry(title="", data=new_opts)
+
+            self._strava_client_id = client_id
+            self._strava_client_secret = client_secret
+
+            # If we already have a refresh token, skip OAuth
+            if self.options.get(CONF_STRAVA_REFRESH_TOKEN):
+                from .strava import fetch_athlete_gear
+
+                self._gear_list = await fetch_athlete_gear(
+                    client_id,
+                    client_secret,
+                    self.options[CONF_STRAVA_REFRESH_TOKEN],
+                )
+                return await self.async_step_strava_activity()
+
+            return await self.async_step_strava_authorize()
+
+        # Pre-fill with existing values
+        current_id = self.options.get(CONF_STRAVA_CLIENT_ID, "")
+        current_secret = self.options.get(CONF_STRAVA_CLIENT_SECRET, "")
+
+        schema = vol.Schema(
+            {
+                vol.Optional(CONF_STRAVA_CLIENT_ID, default=current_id): str,
+                vol.Optional(CONF_STRAVA_CLIENT_SECRET, default=current_secret): str,
+            }
+        )
+
+        return self.async_show_form(
+            step_id="strava_credentials",
+            data_schema=schema,
+        )
+
+    # ── Strava OAuth ─────────────────────────────────────────────────
+
+    async def async_step_strava_authorize(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Step 2: Manual OAuth code entry.
+
+        The user clicks the Strava auth link, authorizes the app, then copies
+        the code from the redirect URL (which will show 'connection refused'
+        since the redirect points to localhost).
+        """
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            code = user_input.get("strava_code", "").strip()
+            if code:
+                from .strava import exchange_code_for_tokens, fetch_athlete_gear
+
+                tokens = await exchange_code_for_tokens(
+                    self._strava_client_id,
+                    self._strava_client_secret,
+                    code,
+                )
+                if tokens and "refresh_token" in tokens:
+                    self._strava_refresh_token = tokens["refresh_token"]
+                    self._gear_list = await fetch_athlete_gear(
+                        self._strava_client_id,
+                        self._strava_client_secret,
+                        tokens["refresh_token"],
+                    )
+                    return await self.async_step_strava_activity()
+                errors["base"] = "strava_auth_failed"
+            else:
+                errors["base"] = "strava_code_required"
+
+        redirect_uri = f"http://localhost:{STRAVA_CALLBACK_PORT}/callback"
+        auth_url = (
+            f"{STRAVA_AUTH_URL}?client_id={self._strava_client_id}"
+            f"&redirect_uri={redirect_uri}"
+            f"&response_type=code&approval_prompt=force"
+            f"&scope=read,profile:read_all,activity:write,activity:read"
+        )
+
+        schema = vol.Schema(
+            {vol.Required("strava_code"): str}
+        )
+
+        return self.async_show_form(
+            step_id="strava_authorize",
+            data_schema=schema,
+            description_placeholders={"auth_url": auth_url},
+            errors=errors,
+        )
+
+    # ── Strava Activity Settings ─────────────────────────────────────
+
+    async def async_step_strava_activity(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Step 3: Activity type, name template, privacy, gear ID."""
+        if user_input is not None:
+            new_opts = dict(self.options)
+            # Use instance variables (set during OAuth) or fall back to existing options
+            new_opts[CONF_STRAVA_CLIENT_ID] = (
+                self._strava_client_id or self.options.get(CONF_STRAVA_CLIENT_ID, "")
+            )
+            new_opts[CONF_STRAVA_CLIENT_SECRET] = (
+                self._strava_client_secret or self.options.get(CONF_STRAVA_CLIENT_SECRET, "")
+            )
+            new_opts[CONF_STRAVA_REFRESH_TOKEN] = (
+                self._strava_refresh_token or self.options.get(CONF_STRAVA_REFRESH_TOKEN, "")
+            )
+            new_opts[CONF_STRAVA_ACTIVITY_TYPE] = user_input.get(CONF_STRAVA_ACTIVITY_TYPE, "auto")
+            new_opts[CONF_STRAVA_NAME_TEMPLATE] = user_input.get(CONF_STRAVA_NAME_TEMPLATE, DEFAULT_NAME_TEMPLATE)
+            new_opts[CONF_STRAVA_HIDE_FROM_HOME] = user_input.get(CONF_STRAVA_HIDE_FROM_HOME, False)
+            new_opts[CONF_STRAVA_PRIVATE] = user_input.get(CONF_STRAVA_PRIVATE, False)
+            new_opts[CONF_STRAVA_GEAR_ID] = user_input.get(CONF_STRAVA_GEAR_ID, "")
+            return self.async_create_entry(title="", data=new_opts)
+
+        # Pre-fill from existing options
+        current = self.options
+
+        # Build gear dropdown options
+        gear_options = [{"value": "", "label": "None"}]
+        for g in self._gear_list:
+            gear_options.append({"value": g["id"], "label": g["name"]})
+
+        schema_fields: dict = {
+            vol.Required(
+                CONF_STRAVA_ACTIVITY_TYPE,
+                default=current.get(CONF_STRAVA_ACTIVITY_TYPE, "auto"),
+            ): selector(
+                {
+                    "select": {
+                        "options": [
+                            "auto",
+                            "Walk",
+                            "Run",
+                            "Ride",
+                            "Rowing",
+                            "Elliptical",
+                        ],
+                        "translation_key": "strava_activity_type",
+                    }
+                }
+            ),
+            vol.Optional(
+                CONF_STRAVA_NAME_TEMPLATE,
+                default=current.get(CONF_STRAVA_NAME_TEMPLATE, DEFAULT_NAME_TEMPLATE),
+            ): str,
+            vol.Optional(
+                CONF_STRAVA_HIDE_FROM_HOME,
+                default=current.get(CONF_STRAVA_HIDE_FROM_HOME, False),
+            ): bool,
+            vol.Optional(
+                CONF_STRAVA_PRIVATE,
+                default=current.get(CONF_STRAVA_PRIVATE, False),
+            ): bool,
+        }
+
+        if len(gear_options) > 1:
+            # Show dropdown when gear is available
+            schema_fields[vol.Optional(
+                CONF_STRAVA_GEAR_ID,
+                default=current.get(CONF_STRAVA_GEAR_ID, ""),
+            )] = selector(
+                {
+                    "select": {
+                        "options": gear_options,
+                    }
+                }
+            )
+        else:
+            # Fall back to text input if gear couldn't be fetched
+            schema_fields[vol.Optional(
+                CONF_STRAVA_GEAR_ID,
+                default=current.get(CONF_STRAVA_GEAR_ID, ""),
+            )] = str
+
+        schema = vol.Schema(schema_fields)
+
+        return self.async_show_form(
+            step_id="strava_activity",
+            data_schema=schema,
+        )
+
+
+# ── Config Flow (unchanged) ──────────────────────────────────────────────
 
 
 class FTMSConfigFlow(ConfigFlow, domain=DOMAIN):

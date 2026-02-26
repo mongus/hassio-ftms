@@ -1,6 +1,7 @@
 """The FTMS integration."""
 
 import logging
+from pathlib import Path
 
 import pyftms
 from bleak.exc import BleakError
@@ -17,9 +18,15 @@ from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import device_registry as dr
 
-from .const import DOMAIN
+from .const import (
+    CONF_STRAVA_CLIENT_ID,
+    CONF_STRAVA_CLIENT_SECRET,
+    CONF_STRAVA_REFRESH_TOKEN,
+    DOMAIN,
+)
 from .coordinator import DataCoordinator
 from .models import FtmsData
+from .session import SessionTracker, strava_configured
 
 PLATFORMS: list[Platform] = [
     Platform.BUTTON,
@@ -37,6 +44,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: FtmsConfigEntry) -> boo
     """Unload a config entry."""
 
     if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
+        if entry.runtime_data.coordinator.session:
+            await entry.runtime_data.coordinator.session.close()
         await entry.runtime_data.ftms.disconnect()
         bluetooth.async_rediscover_address(hass, entry.runtime_data.ftms.address)
 
@@ -52,7 +61,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: FtmsConfigEntry) -> bool
         raise ConfigEntryNotReady(translation_key="device_not_found")
 
     def _on_disconnect(ftms_: pyftms.FitnessMachine) -> None:
-        """Disconnect handler. Reload entry on disconnect."""
+        """Disconnect handler. Save any active session, then reload."""
+
+        if coordinator.session:
+            coordinator.session.on_disconnect()
 
         if ftms_.need_connect:
             hass.config_entries.async_schedule_reload(entry.entry_id)
@@ -105,6 +117,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: FtmsConfigEntry) -> bool
         sensors=entry.options[CONF_SENSORS],
     )
 
+    # Set up session tracker if Strava is configured
+    if strava_configured(entry):
+        workout_dir = Path(hass.config.path("ftms_workouts"))
+        device_name = ftms.device_info.get("model", "Fitness Machine")
+        machine_type_name = ftms.machine_type.name if ftms.machine_type else "treadmill"
+
+        session = SessionTracker(
+            hass=hass,
+            entry=entry,
+            machine_type_name=machine_type_name,
+            device_name=device_name,
+            workout_dir=workout_dir,
+        )
+        coordinator.session = session
+        session._coordinator = coordinator
+        _LOGGER.info("Session tracker active for %s (%s)", device_name, machine_type_name)
+
+        # Upload any pending TCX files from previous sessions
+        hass.async_create_task(session.upload_pending())
+
     @callback
     def _async_on_ble_event(
         srv_info: bluetooth.BluetoothServiceInfoBleak,
@@ -145,7 +177,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: FtmsConfigEntry) -> bool
 async def _async_entry_update_handler(
     hass: HomeAssistant, entry: FtmsConfigEntry
 ) -> None:
-    """Options update handler."""
+    """Options update handler. Reload on user-facing config changes only.
 
-    if entry.options[CONF_SENSORS] != entry.runtime_data.sensors:
+    Token rotation (internal refresh_token updates) should NOT trigger a reload,
+    as that would kill any in-progress BLE session and workout recording.
+    """
+    # Compare current runtime sensors with new options
+    sensors_changed = entry.options.get(CONF_SENSORS) != entry.runtime_data.sensors
+
+    # Compare Strava credentials (not the refresh token, which rotates automatically)
+    old_strava = (
+        entry.runtime_data.coordinator.session is not None
+        if hasattr(entry.runtime_data, "coordinator")
+        else False
+    )
+    new_strava = bool(
+        entry.options.get(CONF_STRAVA_CLIENT_ID)
+        and entry.options.get(CONF_STRAVA_CLIENT_SECRET)
+        and entry.options.get(CONF_STRAVA_REFRESH_TOKEN)
+    )
+    strava_changed = old_strava != new_strava
+
+    if sensors_changed or strava_changed:
         hass.config_entries.async_schedule_reload(entry.entry_id)

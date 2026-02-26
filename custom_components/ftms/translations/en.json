@@ -32,18 +32,57 @@
       "not_supported": "Device not supported.",
       "already_in_progress": "Device setup wizard is already running.",
       "already_configured": "The device is already configured.",
-      "no_devices_found": "No devices found to setup."
+      "no_devices_found": "No devices found to setup.",
+      "strava_auth_failed": "Strava authorization failed. Please try again."
     }
   },
   "options": {
     "step": {
       "init": {
+        "title": "Configuration",
+        "description": "Choose what to configure.",
+        "menu_options": {
+          "sensors": "Training data sensors",
+          "strava_credentials": "Strava upload"
+        }
+      },
+      "sensors": {
         "title": "Training data set",
         "description": "Setting up a set of training data sensors.",
         "data": {
           "sensors": "Select training data:"
         }
+      },
+      "strava_credentials": {
+        "title": "Strava API credentials",
+        "description": "Enter your Strava API application credentials. Leave blank to disable Strava upload.\n\nCreate an API application at https://www.strava.com/settings/api",
+        "data": {
+          "strava_client_id": "Client ID",
+          "strava_client_secret": "Client Secret"
+        }
+      },
+      "strava_authorize": {
+        "title": "Authorize Strava",
+        "description": "1. Open this link: [{auth_url}]({auth_url})\n2. Authorize the application on Strava\n3. You'll see a \"can't reach this page\" error — **this is expected**\n4. Copy the `code` value from the URL in your browser's address bar\n   (it looks like `localhost:8765/callback?...&code=XXXXXX`)\n5. Paste it below",
+        "data": {
+          "strava_code": "Authorization code"
+        }
+      },
+      "strava_activity": {
+        "title": "Strava activity settings",
+        "description": "Configure how workouts appear on Strava.\n\nName template placeholders: `'{activity}'`, `'{device}'`, `'{date}'`, `'{distance_km}'`, `'{duration_min}'`",
+        "data": {
+          "strava_activity_type": "Activity type",
+          "strava_name_template": "Activity name template",
+          "strava_hide_from_home": "Hide from followers' feeds",
+          "strava_private": "Private (only me)",
+          "strava_gear_id": "Gear ID (optional)"
+        }
       }
+    },
+    "error": {
+      "strava_auth_failed": "Failed to exchange authorization code. Please check your credentials and try again.",
+      "strava_code_required": "Please enter the authorization code from the Strava redirect URL."
     }
   },
   "entity": {
@@ -171,6 +210,17 @@
           "pre_workout": "Pre-Workout",
           "post_workout": "Post-Workout"
         }
+      },
+      "session_state": {
+        "name": "Session state",
+        "state": {
+          "idle": "Idle",
+          "recording": "Recording",
+          "uploading": "Uploading"
+        }
+      },
+      "last_workout": {
+        "name": "Last workout"
       }
     },
     "button": {
@@ -185,6 +235,9 @@
       },
       "reset": {
         "name": "Reset"
+      },
+      "upload_workout": {
+        "name": "Upload last workout"
       }
     },
     "number": {
@@ -250,6 +303,16 @@
       "options": {
         "auto": "Auto (within 30 seconds)",
         "manual": "Manual (based on the features report)"
+      }
+    },
+    "strava_activity_type": {
+      "options": {
+        "auto": "Auto-detect from machine type",
+        "Walk": "Walk",
+        "Run": "Run",
+        "Ride": "Ride",
+        "Rowing": "Rowing",
+        "Elliptical": "Elliptical"
       }
     }
   },

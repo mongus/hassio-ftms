@@ -12,9 +12,15 @@
       },
       "reset": {
         "default": "mdi:lock-reset"
+      },
+      "upload_workout": {
+        "default": "mdi:cloud-upload"
       }
     },
     "number": {
+      "target_speed": {
+        "default": "mdi:speedometer"
+      },
       "target_inclination": {
         "default": "mdi:angle-acute"
       },
@@ -90,6 +96,12 @@
       "resistance_level": {
         "default": "mdi:chart-timeline-variant"
       },
+      "speed_average": {
+        "default": "mdi:speedometer"
+      },
+      "speed_instant": {
+        "default": "mdi:speedometer"
+      },
       "split_time_average": {
         "default": "mdi:rowing"
       },
@@ -125,6 +137,16 @@
       },
       "training_status": {
         "default": "mdi:checkbox-marked-outline"
+      },
+      "session_state": {
+        "default": "mdi:circle-outline",
+        "state": {
+          "recording": "mdi:record-circle",
+          "uploading": "mdi:cloud-upload"
+        }
+      },
+      "last_workout": {
+        "default": "mdi:history"
       }
     },
     "switch": {

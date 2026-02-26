@@ -13,12 +13,15 @@ from homeassistant.const import (
     UnitOfTime,
 )
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.entity import EntityDescription
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from pyftms import MovementDirection, TrainingStatusCode
 from pyftms.client import const as c
 
 from . import FtmsConfigEntry
+from .const import LAST_WORKOUT, SESSION_STATE
 from .entity import FtmsEntity
+from .session import strava_configured
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -286,13 +289,32 @@ async def async_setup_entry(
 
     data = entry.runtime_data
 
-    entities = [
+    entities: list[SensorEntity] = [
         FtmsSensorEntity(
             entry=entry,
             description=_ENTITIES[key],
         )
         for key in data.sensors
     ]
+
+    # Add session sensors when Strava is configured
+    if strava_configured(entry):
+        entities.append(
+            SessionStateSensor(
+                entry=entry,
+                description=SensorEntityDescription(
+                    key=SESSION_STATE,
+                    device_class=SensorDeviceClass.ENUM,
+                    options=["idle", "recording", "uploading"],
+                ),
+            )
+        )
+        entities.append(
+            LastWorkoutSensor(
+                entry=entry,
+                description=SensorEntityDescription(key=LAST_WORKOUT),
+            )
+        )
 
     async_add_entities(entities)
 
@@ -323,3 +345,37 @@ class FtmsSensorEntity(FtmsEntity, SensorEntity):
 
             self._attr_native_value = value
             self.async_write_ha_state()
+
+
+class SessionStateSensor(FtmsEntity, SensorEntity):
+    """Sensor showing current session state: idle / recording / uploading."""
+
+    def __init__(self, entry: FtmsConfigEntry, description: EntityDescription) -> None:
+        super().__init__(entry, description)
+        session = self._data.coordinator.session
+        self._attr_native_value = session.state if session else "idle"
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        session = self._data.coordinator.session
+        if session and session.state != self._attr_native_value:
+            self._attr_native_value = session.state
+            self.async_write_ha_state()
+
+
+class LastWorkoutSensor(FtmsEntity, SensorEntity):
+    """Sensor showing last workout summary (e.g. '1.2 km, 15 min')."""
+
+    def __init__(self, entry: FtmsConfigEntry, description: EntityDescription) -> None:
+        super().__init__(entry, description)
+        session = self._data.coordinator.session
+        self._attr_native_value = session.last_workout_summary if session else ""
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        session = self._data.coordinator.session
+        if session:
+            new_val = session.last_workout_summary
+            if new_val != self._attr_native_value:
+                self._attr_native_value = new_val
+                self.async_write_ha_state()
