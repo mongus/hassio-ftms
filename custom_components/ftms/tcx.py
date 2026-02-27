@@ -21,6 +21,78 @@ SPORT_MAP: dict[str, str] = {
 }
 
 
+def _smooth_trackpoints(trackpoints: list[dict]) -> list[dict]:
+    """Smooth and downsample trackpoints for clean Strava pace display.
+
+    Three-stage pipeline:
+    1. Trim leading zero-distance points (belt ramp-up before motion starts).
+    2. Interpolate distance linearly between discrete integer-meter jumps.
+    3. Downsample to one point per ~5s so remaining quantization noise averages out.
+    """
+    if len(trackpoints) < 2:
+        return trackpoints
+
+    # Stage 1: trim leading zero-distance points
+    first_nonzero = 0
+    for i, tp in enumerate(trackpoints):
+        if tp["distance_m"] > 0:
+            first_nonzero = i
+            break
+    if first_nonzero > 0:
+        trackpoints = trackpoints[first_nonzero:]
+    if len(trackpoints) < 2:
+        return trackpoints
+
+    # Stage 2: interpolate between discrete distance jumps
+    changes = [0]
+    for i in range(1, len(trackpoints)):
+        if trackpoints[i]["distance_m"] > trackpoints[changes[-1]]["distance_m"]:
+            changes.append(i)
+
+    if len(changes) < 2:
+        return trackpoints
+
+    result = [dict(tp) for tp in trackpoints]
+
+    for seg in range(len(changes) - 1):
+        i_start = changes[seg]
+        i_end = changes[seg + 1]
+        d_start = trackpoints[i_start]["distance_m"]
+        d_end = trackpoints[i_end]["distance_m"]
+        t_start = trackpoints[i_start]["time"].timestamp()
+        t_end = trackpoints[i_end]["time"].timestamp()
+        dt = t_end - t_start
+        if dt <= 0:
+            continue
+
+        for j in range(i_start + 1, i_end):
+            frac = (trackpoints[j]["time"].timestamp() - t_start) / dt
+            result[j]["distance_m"] = d_start + frac * (d_end - d_start)
+
+    # Stage 3: downsample to reduce quantization ripple
+    interval = 5.0
+    downsampled = [result[0]]
+    last_ts = result[0]["time"].timestamp()
+    for tp in result[1:]:
+        if tp["time"].timestamp() - last_ts >= interval:
+            downsampled.append(tp)
+            last_ts = tp["time"].timestamp()
+    if downsampled[-1] is not result[-1]:
+        downsampled.append(result[-1])
+    result = downsampled
+
+    # Recalculate speed from smoothed, downsampled distance
+    for i in range(1, len(result)):
+        dt = (result[i]["time"] - result[i - 1]["time"]).total_seconds()
+        if dt > 0:
+            dd = result[i]["distance_m"] - result[i - 1]["distance_m"]
+            result[i]["speed_kmh"] = (dd / dt) * 3.6
+    if result:
+        result[0]["speed_kmh"] = result[1]["speed_kmh"] if len(result) > 1 else 0.0
+
+    return result
+
+
 def _iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
@@ -45,6 +117,7 @@ def generate_tcx(
     Each trackpoint dict should have keys:
         time (datetime), distance_m (float), speed_kmh (float).
     """
+    trackpoints = _smooth_trackpoints(trackpoints)
     sport = SPORT_MAP.get(activity_type, "Other")
 
     root = Element("TrainingCenterDatabase")
